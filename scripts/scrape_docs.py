@@ -19,11 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urldefrag, urljoin, urlparse
+from xml.etree import ElementTree
 
 import httpx
-import trafilatura
 from bs4 import BeautifulSoup
-from trafilatura.sitemaps import sitemap_search
+from markdownify import markdownify as html_to_markdown
 
 
 DEFAULT_TIMEOUT = 20.0
@@ -94,7 +94,14 @@ def discover_urls(client: httpx.Client, root_url: str, max_crawl_pages: int) -> 
     root_url = normalize_url(root_url)
 
     try:
-        urls = [normalize_url(url) for url in sitemap_search(root_url)]
+        sitemap_url = urljoin(root_url + "/", "sitemap.xml")
+        sitemap_xml = fetch_text(client, sitemap_url)
+        root = ElementTree.fromstring(sitemap_xml)
+        urls = [
+            normalize_url(node.text)
+            for node in root.findall(".//{*}loc")
+            if node.text and same_site(node.text, root_url)
+        ]
     except Exception:
         urls = []
 
@@ -143,157 +150,66 @@ def best_title(html: str, url: str) -> str:
     return urlparse(url).path.strip("/") or "index"
 
 
-def is_heading(line: str) -> bool:
-    return bool(re.match(r"^#{1,6}\s", line))
-
-
-def is_list_item(line: str) -> bool:
-    return bool(re.match(r"^(\s*[-*+]\s|\s*\d+\.\s)", line))
-
-
-def is_table_line(line: str) -> bool:
-    return line.count("|") >= 2 or bool(re.match(r"^\|?[-: ]+\|[-|: ]*$", line))
-
-
-def is_block_line(line: str) -> bool:
-    stripped = line.strip()
-    return (
-        is_heading(line)
-        or is_list_item(line)
-        or is_table_line(line)
-        or stripped.startswith("```")
-        or stripped.startswith("> ")
-        or stripped == "---"
-    )
-
-
-def fix_inline_spacing(line: str) -> str:
-    line = re.sub(r"\s+([,.;:)])", r"\1", line)
-    line = re.sub(r"(`[^`]+`)\s+([,.;:)])", r"\1\2", line)
-    line = re.sub(r"\*\*([^*\n]+)\*\*([A-Za-z0-9(])", r"**\1** \2", line)
-    line = re.sub(r"([A-Za-z0-9.,)])\*\*([^*\n]+)\*\*", r"\1 **\2**", line)
-    line = re.sub(r"([A-Za-z0-9])(\[)", r"\1 \2", line)
-    line = re.sub(r"\](\w)", r"] \1", line)
-    line = re.sub(r"([.?!:;])([A-Z])", r"\1 \2", line)
-    line = re.sub(r"([.?!:;])(`[^`]+`)", r"\1 \2", line)
-    line = re.sub(r"([A-Za-z0-9])(`[^`]+`)", r"\1 \2", line)
-    line = re.sub(r"(`[^`]+`)([A-Za-z0-9])", r"\1 \2", line)
-    return line.strip()
-
-
-def clean_join_artifacts(line: str) -> str:
-    line = re.sub(r"(`[^`]+`)\s+([,.;:)])", r"\1\2", line)
-    line = re.sub(r"([.?!:;])(`[^`]+`)", r"\1 \2", line)
-    return line
-
-
-def should_drop_blank(prev_line: str, next_line: str) -> bool:
-    prev = prev_line.strip()
-    nxt = next_line.strip()
-    if not prev or not nxt or is_block_line(prev) or is_block_line(nxt):
-        return False
-    if prev.endswith(("(", "[", "{", "/", ":", ";", ",")):
-        return True
-    if re.search(
-        r"\b(a|an|and|are|as|at|be|between|by|for|from|has|have|if|in|is|of|on|or|that|the|their|this|to|was|were|with)$",
-        prev,
-    ):
-        return True
-    if nxt.startswith(("`", "**", "*", "(", ")", "[", ".", ",", ":", ";")):
-        return True
-    if re.match(r"^[a-z]", nxt):
-        return True
-    return False
-
-
-def join_markdown_lines(lines: list[str]) -> list[str]:
-    joined: list[str] = []
-    in_code_block = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            in_code_block = not in_code_block
-            joined.append(line)
-            continue
-
-        if in_code_block or not joined:
-            joined.append(line)
-            continue
-
-        if stripped in {".", ",", ":", ";", "!", "?"}:
-            joined[-1] = joined[-1].rstrip() + stripped
-            continue
-
-        previous = joined[-1]
-        previous_stripped = previous.strip()
-        if (
-            previous_stripped
-            and stripped
-            and not is_block_line(previous_stripped)
-            and not is_block_line(stripped)
-        ):
-            joined[-1] = f"{previous.rstrip()} {stripped}"
-            continue
-
-        if previous_stripped and is_list_item(previous_stripped) and not is_block_line(stripped):
-            joined[-1] = f"{previous.rstrip()} {stripped}"
-            continue
-
-        joined.append(line)
-
-    return joined
+def is_definitely_ui_line(line: str) -> bool:
+    return line.strip() in {
+        "Copy",
+        "Ask AI",
+        "Search...",
+        "Skip to main content",
+    }
 
 
 def clean_markdown(markdown: str) -> str:
-    markdown = re.sub(r"(?<!\n)(#{2,6}\s)", r"\n\n\1", markdown)
-    markdown = re.sub(r"([.!?])\s+(-\s)", r"\1\n\2", markdown)
+    markdown = markdown.replace("\u200b", "")
+    markdown = re.sub(r"\[\s*\]\(#.*?\)", "", markdown)
+    markdown = re.sub(r"\[(?:¶|§)\]\(#.*?\)", "", markdown)
+    markdown = re.sub(r"^\s*\[\]\(#.*?\)\s*$", "", markdown, flags=re.MULTILINE)
     cleaned: list[str] = []
     blank_run = 0
 
     for raw_line in markdown.splitlines():
-        line = fix_inline_spacing(raw_line.rstrip())
-        if not line:
+        line = raw_line.rstrip()
+        if not line.strip() or is_definitely_ui_line(line):
             blank_run += 1
             if blank_run <= 1:
                 cleaned.append("")
-            continue
-        if line.strip() == "#":
             continue
 
         blank_run = 0
         cleaned.append(line)
 
-    squeezed: list[str] = []
-    for index, line in enumerate(cleaned):
-        if line != "":
-            squeezed.append(line)
-            continue
-
-        prev_line = next((item for item in reversed(squeezed) if item != ""), "")
-        next_line = next((item for item in cleaned[index + 1 :] if item != ""), "")
-        if should_drop_blank(prev_line, next_line):
-            continue
-        if squeezed and squeezed[-1] != "":
-            squeezed.append("")
-
-    cleaned = [clean_join_artifacts(line) if line else "" for line in join_markdown_lines(squeezed)]
     return "\n".join(cleaned).strip()
 
 
-def extract_markdown(html: str, url: str) -> str | None:
-    markdown = trafilatura.extract(
-        html,
-        url=url,
-        output_format="markdown",
-        include_tables=True,
-        include_links=False,
-        include_formatting=True,
-        favor_precision=True,
+def strip_prelude(markdown: str) -> str:
+    lines = markdown.splitlines()
+    first_h1 = next((i for i, line in enumerate(lines[:30]) if line.startswith("# ")), None)
+    if first_h1 is not None:
+        lines = lines[first_h1 + 1 :]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def extract_markdown(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    content = soup.find(id="content-area") or soup.body
+    if content is None:
+        return None
+
+    for tag in content.select(
+        "script, style, noscript, svg, button, form, input, textarea, footer, a.group.w-full"
+    ):
+        tag.decompose()
+
+    markdown = html_to_markdown(
+        str(content),
+        heading_style="ATX",
+        bullets="-",
+        strip=["img"],
     )
-    if markdown:
-        markdown = clean_markdown(markdown)
+    markdown = clean_markdown(markdown)
+    markdown = strip_prelude(markdown)
     return markdown or None
 
 
@@ -372,7 +288,7 @@ def scrape(root_url: str, output_dir: Path, combined_name: str, max_crawl_pages:
                 print(f"[warn] failed to fetch {url}: {exc}", file=sys.stderr)
                 continue
 
-            markdown = extract_markdown(html, url)
+            markdown = extract_markdown(html)
             if not markdown:
                 print(f"[warn] failed to extract readable markdown for {url}", file=sys.stderr)
                 continue

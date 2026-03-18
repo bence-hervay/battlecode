@@ -4,29 +4,67 @@ Source: https://docs.battlecode.cam/getting-started/matches
 
 ---
 
-## Match format
+How ladder matches, ratings, and the best-of-5 format work.
+
+##  Match format
 
 Every match consists of **5 games**. Each game is played on a different map with a different random seed. The team that wins more games wins the match.
 
-## Win conditions per game
+###  Win conditions per game
 
-A game ends when:| Condition | Description |
-|---|---|
-Core destroyed | One team’s core reaches 0 HP |
-Resources | After 2000 rounds, the tiebreaker sequence determines the winner |
-Timeout | After 2000 rounds with equal tiebreakers — decided by coinflip |
+A game ends when:
 
-## Ladder
+| Condition | Description |
+| --- | --- |
+| **Core destroyed** | One team’s core reaches 0 HP |
+| **Resources** | After 2000 rounds, the [tiebreaker sequence](/spec/overview#win-conditions) determines the winner |
+| **Timeout** | After 2000 rounds with equal tiebreakers — decided by coinflip |
 
-The ladder ranks all teams by **Glicko-2** rating. New teams start unrated and are seeded to 1500 when they upload their first ready submission.
+##  Ladder
 
-## Scheduling
+The [ladder](https://game.battlecode.cam/ladder) ranks all teams by **Glicko-2** rating. New teams start unrated and are seeded to 1500 when they upload their first ready submission.
+
+###  Scheduling
 
 Every **10 minutes**, the scheduler:
 
-- Pairs each team with one similarly-rated opponent (greedy nearest-rating matching with small random jitter to avoid repetitive matchups)
-- Avoids rematches from the last hour
-- Submits matches to the runner infrastructure 
-## Rating updates
+1. Pairs each team with one similarly-rated opponent (greedy nearest-rating matching with small random jitter to avoid repetitive matchups)
+2. Avoids rematches from the last hour
+3. Submits matches to the runner infrastructure
 
-Ratings are updated using **Glicko-2** after each scheduler cycle. Match outcomes use fractional scoring based on the game score (e.g., a 5-0 win counts more than a 3-2 win). Each team has three rating components: **Rating **— skill estimate (starts at 1500)** Uncertainty (RD) **— confidence in the rating (starts high, decreases with more matches)** Volatility**— expected rating fluctuation
+With N teams, each cycle creates floor(N/2) matches — one match per team.
+
+###  Rating updates
+
+Ratings are updated using **Glicko-2** after each scheduler cycle. Match outcomes use fractional scoring based on the game score (e.g., a 5-0 win counts more than a 3-2 win).
+Each team has three rating components:
+
+- **Rating** — skill estimate (starts at 1500)
+- **Uncertainty (RD)** — confidence in the rating (starts high, decreases with more matches)
+- **Volatility** — expected rating fluctuation
+
+##  Unrated matches
+
+You can challenge any team to an unrated match that doesn’t affect ratings:
+
+```
+cambc unrated <opponent_team_id>
+```
+
+Unrated matches use the same infrastructure and time limits as ladder matches but are prioritised for faster execution.
+
+##  Test runs
+
+Test runs let you upload two local bots and run them against each other on the same hardware as ladder matches:
+
+```
+cambc test-run my_bot opponent
+```
+
+This is the best way to verify your bot works within the 2ms CPU time limit before submitting to the ladder.
+
+Rate limits: max 10 test/unrated matches per 5 minutes. Unrated matches also have a 5-minute cooldown per specific matchup.
+
+[Previous](/getting-started/submitting)
+
+⌘I
