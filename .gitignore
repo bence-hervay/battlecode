@@ -1,10 +1,3 @@
-# Replays (regenerated with cambc run)
-*.replay26
-
-# Python
-__pycache__/
-*.pyc
-
-# Virtual environments
 .venv/
-venv/
+__pycache__/
+tmp/
